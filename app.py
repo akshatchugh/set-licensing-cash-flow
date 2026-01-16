@@ -233,6 +233,8 @@ if 'invoice_register_df' not in st.session_state:
     st.session_state.invoice_register_df = None
 if 'ar_inputs' not in st.session_state:
     st.session_state.ar_inputs = None
+if 'ar_data_file' not in st.session_state:
+    st.session_state.ar_data_file = None
 if 'collection_vector' not in st.session_state:
     st.session_state.collection_vector = None
 if 'collection_table' not in st.session_state:
