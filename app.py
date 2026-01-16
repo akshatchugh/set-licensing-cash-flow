@@ -760,6 +760,70 @@ def rescale_collection_vector(month_cols: list, collection_vector: list, frequen
     return pd.DataFrame()
 
 
+def parse_ar_csv(csv_file) -> dict:
+    """
+    Parse AR CSV (format: test_documents/AR.csv) and extract AR for Jul, Jun, May,
+    and Upto Apr from the Grand Total row. Values are normalized by 1e7.
+    """
+    if csv_file is None:
+        return {}
+
+    if hasattr(csv_file, "seek"):
+        csv_file.seek(0)
+    df = pd.read_csv(csv_file, header=5)
+    if df.empty:
+        return {}
+
+    first_col = df.columns[0]
+    grand_row = df[df[first_col].astype(str).str.strip().str.lower() == "grand total"]
+    if grand_row.empty:
+        return {}
+    grand_row = grand_row.iloc[0]
+
+    def _parse_numeric(val) -> float:
+        s = str(val).strip()
+        if s in {"", "-", " -", " -   "}:
+            return 0.0
+        neg = s.startswith("(") and s.endswith(")")
+        if neg:
+            s = s[1:-1]
+        s = s.replace(",", "")
+        s = re.sub(r"[^0-9\.-]", "", s)
+        if s in {"", "-"}:
+            return 0.0
+        try:
+            num = float(s)
+        except Exception:
+            return 0.0
+        return -num if neg else num
+
+    # Month columns appear after the first two columns
+    month_cols = list(df.columns[2:])
+    month_names = [str(c).strip() for c in month_cols]
+
+    def _get_month_val(month: str) -> float:
+        if month not in month_names:
+            return 0.0
+        col = month_cols[month_names.index(month)]
+        return _parse_numeric(grand_row.get(col, 0.0))
+
+    # Upto Apr: sum all month columns up to and including the Apr that appears before May
+    upto_apr_val = 0.0
+    if "May" in month_names:
+        may_idx = month_names.index("May")
+        upto_apr_cols = month_cols[:may_idx]
+        for col in upto_apr_cols:
+            upto_apr_val += _parse_numeric(grand_row.get(col, 0.0))
+
+    ar_inputs = {
+        "upto_apr": round(upto_apr_val / 10000000, 2),
+        "may": round(_get_month_val("May") / 10000000, 2),
+        "jun": round(_get_month_val("Jun") / 10000000, 2),
+        "jul": round(_get_month_val("Jul") / 10000000, 2),
+    }
+    return ar_inputs
+
+
 # All calculation functions are imported from cash_flow_calculator
 # Only Streamlit-specific wrappers are kept here
 
@@ -1055,22 +1119,30 @@ elif page == "5. Payment Trend":
 # Step 6: Collection Trend
 elif page == "6. Collection Trend":
     st.header("📊 Step 6: Collection Trend")
-    st.markdown("Provide AR as of 31 July '25 (4 months) to calculate collection trend.")
+    st.markdown("Upload AR CSV (format: test_documents/AR.csv) to calculate collection trend.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        upto_apr = st.number_input("AR Upto Apr '25", min_value=0.0, value=0.0, step=0.01)
-        may_val = st.number_input("AR May '25", min_value=0.0, value=0.0, step=0.01)
-    with col2:
-        jun_val = st.number_input("AR Jun '25", min_value=0.0, value=0.0, step=0.01)
-        jul_val = st.number_input("AR Jul '25", min_value=0.0, value=0.0, step=0.01)
+    ar_csv = st.file_uploader(
+        "AR CSV",
+        type=['csv']
+    )
 
-    st.session_state.ar_inputs = {
-        "upto_apr": upto_apr,
-        "may": may_val,
-        "jun": jun_val,
-        "jul": jul_val,
-    }
+    if ar_csv is not None:
+        st.session_state.ar_data_file = ar_csv
+
+    if st.session_state.ar_data_file is not None:
+        ar_inputs = parse_ar_csv(st.session_state.ar_data_file)
+        if ar_inputs:
+            st.session_state.ar_inputs = ar_inputs
+            st.subheader("AR Inputs (from Grand Total, normalized)")
+            ar_df = pd.DataFrame([{
+                "Upto Apr '25 (A-4)": ar_inputs.get("upto_apr", 0.0),
+                "May '25 (A-3)": ar_inputs.get("may", 0.0),
+                "Jun '25 (A-2)": ar_inputs.get("jun", 0.0),
+                "Jul '25 (A-1)": ar_inputs.get("jul", 0.0),
+            }])
+            st.dataframe(clean_dataframe_for_display(ar_df))
+        else:
+            st.warning("⚠️ Unable to parse AR inputs from the CSV. Please check the format.")
 
     frequency = st.selectbox(
         "Display frequency",
