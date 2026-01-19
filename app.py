@@ -6,6 +6,7 @@ from typing import Optional
 import warnings
 import re
 import json
+import io
 from pathlib import Path
 import calendar
 warnings.filterwarnings('ignore')
@@ -80,6 +81,8 @@ def load_persisted_state():
         st.session_state.step4_table = _deserialize_df(data.get('step4_table', []))
     if 'step5_accrual_table' in data and st.session_state.step5_accrual_table is None:
         st.session_state.step5_accrual_table = _deserialize_df(data.get('step5_accrual_table', []))
+    if 'step5_full_table' in data and st.session_state.step5_full_table is None:
+        st.session_state.step5_full_table = _deserialize_df(data.get('step5_full_table', []))
     if 'step5_split_table' in data and st.session_state.step5_split_table is None:
         st.session_state.step5_split_table = _deserialize_df(data.get('step5_split_table', []))
     if 'step5_total_table' in data and st.session_state.step5_total_table is None:
@@ -110,6 +113,7 @@ def persist_state():
         'weighted_avg_df': _serialize_df(st.session_state.weighted_avg_df),
         'step4_table': _serialize_df(st.session_state.step4_table),
         'step5_accrual_table': _serialize_df(st.session_state.step5_accrual_table),
+        'step5_full_table': _serialize_df(st.session_state.step5_full_table),
         'step5_split_table': _serialize_df(st.session_state.step5_split_table),
         'step5_total_table': _serialize_df(st.session_state.step5_total_table),
         'weighted_avg_vector': st.session_state.weighted_avg_vector,
@@ -141,6 +145,7 @@ def clean_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     # Convert all object columns to string to avoid mixed type issues
     for col in df_clean.columns:
         try:
+            col_name = str(col).strip().lower()
             # Format numeric columns with Indian notation and 2 decimals for display
             if pd.api.types.is_numeric_dtype(df_clean[col]):
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0)
@@ -149,7 +154,13 @@ def clean_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
             
             # Handle datetime columns - convert to string for display
             if pd.api.types.is_datetime64_any_dtype(df_clean[col]):
-                df_clean[col] = df_clean[col].dt.strftime('%Y-%m-%d').fillna('')
+                df_clean[col] = df_clean[col].dt.strftime('%b-%y').fillna('')
+                continue
+            # Handle date-like object columns
+            if col_name == "month" or "date" in col_name:
+                parsed = pd.to_datetime(df_clean[col], errors='ignore')
+                df_clean[col] = parsed.dt.strftime('%b-%y').fillna('')
+                continue
             # Handle object columns (which may contain mixed types)
             elif df_clean[col].dtype == 'object':
                 # Check if column contains dicts or lists
@@ -173,7 +184,7 @@ def clean_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
                     df_clean[col] = df_clean[col].apply(_format_indian_number)
                 else:
                     df_clean[col] = df_clean[col].astype(str).fillna('')
-            except:
+            except Exception:
                 # Last resort - replace column with string version
                 df_clean[col] = df_clean[col].apply(lambda x: str(x) if pd.notna(x) else '')
     
@@ -223,6 +234,8 @@ if 'accrual_billing_vector' not in st.session_state:
     st.session_state.accrual_billing_vector = None
 if 'step5_accrual_table' not in st.session_state:
     st.session_state.step5_accrual_table = None
+if 'step5_full_table' not in st.session_state:
+    st.session_state.step5_full_table = None
 if 'step5_split_table' not in st.session_state:
     st.session_state.step5_split_table = None
 if 'step5_total_table' not in st.session_state:
@@ -235,6 +248,8 @@ if 'ar_inputs' not in st.session_state:
     st.session_state.ar_inputs = None
 if 'ar_data_file' not in st.session_state:
     st.session_state.ar_data_file = None
+if 'total_billing_vector' not in st.session_state:
+    st.session_state.total_billing_vector = None
 if 'collection_vector' not in st.session_state:
     st.session_state.collection_vector = None
 if 'collection_table' not in st.session_state:
@@ -253,6 +268,176 @@ def extract_text_from_pdf_streamlit(pdf_file) -> str:
         return ""
 
 
+def _detect_header_row(df: pd.DataFrame, keywords: list) -> Optional[int]:
+    for idx, row in df.iterrows():
+        row_texts = row.astype(str).str.lower()
+        if all(row_texts.str.contains(str(k).lower(), na=False).any() for k in keywords):
+            return idx
+    return None
+
+
+def _make_unique_columns(columns: list) -> list:
+    """Make column names unique by appending suffixes to duplicates."""
+    seen = {}
+    unique_cols = []
+    for col in columns:
+        col_str = str(col).strip() if col is not None else ""
+        if not col_str:
+            col_str = "Unnamed"
+        if col_str in seen:
+            seen[col_str] += 1
+            unique_cols.append(f"{col_str}_{seen[col_str]}")
+        else:
+            seen[col_str] = 0
+            unique_cols.append(col_str)
+    return unique_cols
+
+
+def _apply_header_row(df: pd.DataFrame, header_idx: int) -> pd.DataFrame:
+    header = df.iloc[header_idx].tolist()
+    data = df.iloc[header_idx + 1:].copy()
+    data.columns = _make_unique_columns(header)
+    data = data.dropna(how="all")
+    return data
+
+
+def _is_month_col(col) -> bool:
+    if isinstance(col, pd.Timestamp):
+        return True
+    try:
+        import datetime as _dt
+        if isinstance(col, _dt.datetime):
+            return True
+    except Exception:
+        pass
+    s = str(col).strip()
+    if re.match(r'^[A-Za-z]{3}-\d{2}$', s):
+        return True
+    dt = pd.to_datetime(s, errors='coerce')
+    return pd.notna(dt) and dt.day == 1
+
+
+def _month_label(col) -> str:
+    if isinstance(col, pd.Timestamp):
+        return col.strftime('%b-%y')
+    try:
+        import datetime as _dt
+        if isinstance(col, _dt.datetime):
+            return col.strftime('%b-%y')
+    except Exception:
+        pass
+    s = str(col).strip()
+    if re.match(r'^[A-Za-z]{3}-\d{2}$', s):
+        return s
+    dt = pd.to_datetime(s, errors='coerce')
+    if pd.notna(dt):
+        return dt.strftime('%b-%y')
+    return s
+
+
+def _find_contract_header(df: pd.DataFrame) -> Optional[int]:
+    candidates = []
+    for idx, row in df.iterrows():
+        row_texts = row.astype(str).str.lower()
+        if not row_texts.str.contains("client name", na=False).any():
+            continue
+        date_like = 0
+        for val in row.values:
+            dt = pd.to_datetime(val, errors='coerce')
+            if pd.notna(dt):
+                date_like += 1
+        if date_like >= 2:
+            candidates.append(idx)
+    if candidates:
+        return max(candidates)
+    return _detect_header_row(df, ["Client Name"])
+
+
+def _coerce_numeric(series: pd.Series) -> pd.Series:
+    series = series.astype(str)
+    series = series.str.replace(',', '', regex=False).str.replace('"', '', regex=False).str.strip()
+    series = series.replace({'': '0', '-': '0', ' -': '0', ' -   ': '0'})
+    series = series.str.replace(r'[^0-9\.-]', '', regex=True)
+    return pd.to_numeric(series, errors='coerce').fillna(0)
+
+
+def parse_contract_full_table(csv_file, top_n: Optional[int] = None) -> pd.DataFrame:
+    """
+    Parse contract data CSV and return the full table with monthly totals
+    and a weighted average row appended at the end.
+    """
+    if csv_file is None:
+        return pd.DataFrame()
+
+    if isinstance(csv_file, pd.DataFrame):
+        raw_df = csv_file.copy()
+    else:
+        if hasattr(csv_file, "seek"):
+            csv_file.seek(0)
+        raw_df = pd.read_csv(csv_file, header=None)
+
+    header_idx = _find_contract_header(raw_df)
+    if header_idx is None:
+        return pd.DataFrame()
+    df = _apply_header_row(raw_df, header_idx)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Drop duplicate header rows if present
+    if 'Client Name' in df.columns:
+        df = df[df['Client Name'] != 'Client Name']
+        df = df[~df['Client Name'].astype(str).str.strip().str.lower().isin(["total", "weighted average"])]
+
+    # Filter to rows with a customer code if available
+    normalized_cols = {col: str(col).strip().lower() for col in df.columns}
+    customer_code_col = None
+    for col, norm in normalized_cols.items():
+        if "customer code" in norm:
+            customer_code_col = col
+            break
+    if customer_code_col is not None:
+        code_series = df[customer_code_col].astype(str).str.strip()
+        
+        df = df[code_series != "nan"]
+
+    # Identify deal value column for top-N filtering
+    normalized_cols = {col: str(col).strip().lower() for col in df.columns}
+    deal_value_col = None
+    for col, norm in normalized_cols.items():
+        if 'deal value' in norm:
+            deal_value_col = col
+            break
+
+    if top_n is not None and deal_value_col is not None:
+        deal_values = _coerce_numeric(df[deal_value_col])
+        df = df.assign(_deal_value=deal_values)
+        df = df.sort_values('_deal_value', ascending=False).head(top_n)
+        df = df.drop(columns=['_deal_value'])
+
+    month_cols = [col for col in df.columns if _is_month_col(col)]
+    if not month_cols:
+        return df
+
+    month_labels = [_month_label(col) for col in month_cols]
+    df = df.rename(columns={col: label for col, label in zip(month_cols, month_labels)})
+
+    totals = {label: _coerce_numeric(df[label]).sum() for label in month_labels}
+    total_all_months = sum(totals.values()) or 1
+    weighted = {label: totals[label] / total_all_months for label in month_labels}
+
+    total_row = {col: "" for col in df.columns}
+    weighted_row = {col: "" for col in df.columns}
+    if "Client Name" in df.columns:
+        total_row["Client Name"] = "Total"
+        weighted_row["Client Name"] = "Weighted Average"
+    for label in month_labels:
+        total_row[label] = round(totals[label], 2)
+        weighted_row[label] = f"{round(weighted[label] * 100)}%"
+
+    return pd.concat([df, pd.DataFrame([total_row, weighted_row])], ignore_index=True)
+
+
 
 
 def parse_contract_weighted_avg(csv_file, top_n: Optional[int] = None) -> pd.DataFrame:
@@ -265,8 +450,17 @@ def parse_contract_weighted_avg(csv_file, top_n: Optional[int] = None) -> pd.Dat
     if csv_file is None:
         return pd.DataFrame()
 
-    # Read CSV with header at row 2 (0-based index)
-    df = pd.read_csv(csv_file, header=2)
+    if isinstance(csv_file, pd.DataFrame):
+        raw_df = csv_file.copy()
+    else:
+        if hasattr(csv_file, "seek"):
+            csv_file.seek(0)
+        raw_df = pd.read_csv(csv_file, header=None)
+
+    header_idx = _find_contract_header(raw_df)
+    if header_idx is None:
+        return pd.DataFrame()
+    df = _apply_header_row(raw_df, header_idx)
 
     if df.empty:
         return pd.DataFrame()
@@ -275,12 +469,36 @@ def parse_contract_weighted_avg(csv_file, top_n: Optional[int] = None) -> pd.Dat
     if 'Client Name' in df.columns:
         df = df[df['Client Name'] != 'Client Name']
 
+    # Filter to rows with a customer code if available
+    normalized_cols = {col: str(col).strip().lower() for col in df.columns}
+    customer_code_col = None
+    for col, norm in normalized_cols.items():
+        if "customer code" in norm:
+            customer_code_col = col
+            break
+    if customer_code_col is not None:
+        code_series = df[customer_code_col].astype(str).str.strip()
+        df = df[code_series != ""]
+
     # Identify month columns (e.g., Apr-24, May-24)
-    month_pattern = re.compile(r'^[A-Za-z]{3}-\d{2}$')
-    month_cols = [col for col in df.columns if month_pattern.match(str(col).strip())]
+    deal_idx = None
+    for i, col in enumerate(df.columns):
+        if str(col).strip().lower() == "complete deal value":
+            deal_idx = i
+            break
+
+    month_cols = []
+    month_labels = []
+    for i, col in enumerate(df.columns):
+        if deal_idx is not None and i <= deal_idx:
+            continue
+        if _is_month_col(col):
+            month_cols.append(col)
+            month_labels.append(_month_label(col))
     # Keep original order; limit to first 24 months to match expected output
     if len(month_cols) > 24:
         month_cols = month_cols[:24]
+        month_labels = month_labels[:24]
 
     if not month_cols:
         return pd.DataFrame()
@@ -306,13 +524,13 @@ def parse_contract_weighted_avg(csv_file, top_n: Optional[int] = None) -> pd.Dat
 
     # Clean and convert month columns to numeric
     month_totals = {}
-    for col in month_cols:
+    for col, label in zip(month_cols, month_labels):
         series = df[col].astype(str)
         series = series.str.replace(',', '', regex=False).str.replace('"', '', regex=False).str.strip()
         series = series.replace({'': '0', '-': '0', ' -': '0', ' -   ': '0'})
         series = series.str.replace(r'[^0-9\.-]', '', regex=True)
         values = pd.to_numeric(series, errors='coerce').fillna(0)
-        month_totals[str(col).strip()] = values.sum()
+        month_totals[label] = values.sum()
 
     # Calculate total across all months
     total_all_months = sum(month_totals.values())
@@ -321,7 +539,8 @@ def parse_contract_weighted_avg(csv_file, top_n: Optional[int] = None) -> pd.Dat
 
     # Build weighted average DataFrame
     data = []
-    for month, total in month_totals.items():
+    for month in month_labels:
+        total = month_totals.get(month, 0)
         parsed_month = pd.to_datetime(month, format='%b-%y', errors='coerce')
         month_label = parsed_month.strftime('%Y-%m') if pd.notna(parsed_month) else month
         weighted_avg = total / total_all_months
@@ -342,23 +561,18 @@ def parse_revenue_csv(csv_file) -> pd.DataFrame:
     if csv_file is None:
         return pd.DataFrame()
     try:
+        if hasattr(csv_file, "seek"):
+            csv_file.seek(0)
         raw_df = pd.read_csv(csv_file, header=None)
     except Exception:
         return pd.DataFrame()
 
-    header_row_idx = None
-    for idx, row in raw_df.iterrows():
-        if row.astype(str).str.contains("Channel Allocation", case=False, na=False).any():
-            header_row_idx = idx
-            break
-
+    header_row_idx = _detect_header_row(raw_df, ["Channel Allocation"])
     if header_row_idx is not None:
-        header = raw_df.iloc[header_row_idx].tolist()
-        data = raw_df.iloc[header_row_idx + 1:].copy()
-        data.columns = [str(col).strip() for col in header]
-        data = data.dropna(how="all")
-        return data
+        return _apply_header_row(raw_df, header_row_idx)
 
+    if hasattr(csv_file, "seek"):
+        csv_file.seek(0)
     return pd.read_csv(csv_file, header=0)
 
 
@@ -371,44 +585,77 @@ def build_step4_table(revenue_df: pd.DataFrame, weights: list) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Identify month columns in revenue data
-    month_pattern = re.compile(r'^[A-Za-z]{3}-\d{2}$')
-    month_cols = [col for col in revenue_df.columns if month_pattern.match(str(col).strip())]
+    month_cols = []
+    month_labels = []
+    for col in revenue_df.columns:
+        if _is_month_col(col):
+            month_cols.append(col)
+            month_labels.append(_month_label(col))
     if not month_cols:
         return pd.DataFrame()
 
     # Use data from Aug-25 onward
-    if 'Aug-25' in month_cols:
-        start_idx = month_cols.index('Aug-25')
+    if 'Aug-25' in month_labels:
+        start_idx = month_labels.index('Aug-25')
         month_cols = month_cols[start_idx:]
+        month_labels = month_labels[start_idx:]
 
     # Limit to Aug-25 .. Mar-26 (expected output range)
-    target_months = []
-    for col in month_cols:
-        target_months.append(col)
-        if col == 'Mar-26':
+    target_cols = []
+    target_labels = []
+    for col, label in zip(month_cols, month_labels):
+        target_cols.append(col)
+        target_labels.append(label)
+        if label == 'Mar-26':
             break
-    month_cols = target_months
+    month_cols = target_cols
+    month_labels = target_labels
 
-    # Compute total revenue per month
+    def _parse_num(val) -> float:
+        try:
+            s = str(val).strip().replace(",", "").replace('"', "")
+            if s in {"", "-", " -", " -   "}:
+                return 0.0
+            s = re.sub(r'[^0-9\.-]', '', s)
+            return float(s) if s else 0.0
+        except Exception:
+            return 0.0
+
+    # Compute revenue per month using "Total" row if present
+    total_row = None
+    channel_col = None
+    for col in revenue_df.columns:
+        if str(col).strip().lower() == "channel allocation":
+            channel_col = col
+            break
+    if channel_col is not None:
+        channel_vals = revenue_df[channel_col].astype(str).str.strip().str.lower()
+        total_rows = revenue_df[channel_vals == "total"]
+        if not total_rows.empty:
+            total_row = total_rows.iloc[0]
+
     revenues = []
     for col in month_cols:
-        series = revenue_df[col].astype(str).str.strip()
-        series = series.replace({'': '0', '-': '0', ' -': '0', ' -   ': '0'})
-        values = pd.to_numeric(series, errors='coerce').fillna(0)
-        revenues.append(round(values.sum(), 2))
+        if total_row is not None:
+            revenues.append(round(_parse_num(total_row.get(col, 0)), 2))
+        else:
+            series = revenue_df[col].astype(str).str.strip()
+            series = series.replace({'': '0', '-': '0', ' -': '0', ' -   ': '0'})
+            values = pd.to_numeric(series, errors='coerce').fillna(0)
+            revenues.append(round(values.sum(), 2))
 
     # Use only as many weights as needed for the revenue range
     weights = weights[:len(month_cols)]
 
     # Build table rows
     rows = []
-    for i, month in enumerate(month_cols):
+    for i, month in enumerate(month_labels):
         row = {
-            'Month': month,
+            'Month': str(month),
             'Revenue For the month': revenues[i]
         }
         # Fill summand cells
-        for j, bill_month in enumerate(month_cols):
+        for j, bill_month in enumerate(month_labels):
             if j >= i:
                 row[bill_month] = round(revenues[i] * weights[j - i], 2)
             else:
@@ -419,11 +666,11 @@ def build_step4_table(revenue_df: pd.DataFrame, weights: list) -> pd.DataFrame:
 
     # Totals row
     totals_row = {
-        'Month': '',
+        'Month': 'Total',
         'Revenue For the month': round(sum(revenues), 2)
     }
     billing_vector = []
-    for j, bill_month in enumerate(month_cols):
+    for j, bill_month in enumerate(month_labels):
         total = 0
         for i in range(j + 1):
             total += revenues[i] * weights[j - i]
@@ -434,7 +681,7 @@ def build_step4_table(revenue_df: pd.DataFrame, weights: list) -> pd.DataFrame:
     totals_row['Total'] = round(sum(billing_vector), 2)
     table_df['Total'] = ''
     table_df = pd.concat([table_df, pd.DataFrame([totals_row])], ignore_index=True)
-
+    print(table_df)
     # Store billing vector for later steps
     st.session_state.monthly_billing_vector = billing_vector
 
@@ -514,8 +761,17 @@ def build_domestic_international_table_from_revenue(revenue_df: pd.DataFrame, mo
     domestic_row = domestic_row.iloc[0]
     international_row = international_row.iloc[0]
 
-    domestic_values = [round(_parse_numeric(domestic_row.get(col, 0)), 2) for col in month_cols]
-    international_values = [round(_parse_numeric(international_row.get(col, 0)), 2) for col in month_cols]
+    col_label_map = {}
+    for col in revenue_df.columns:
+        if _is_month_col(col):
+            col_label_map[_month_label(col)] = col
+
+    domestic_values = []
+    international_values = []
+    for label in month_cols:
+        col = col_label_map.get(label)
+        domestic_values.append(round(_parse_numeric(domestic_row.get(col, 0)), 2) if col is not None else 0.0)
+        international_values.append(round(_parse_numeric(international_row.get(col, 0)), 2) if col is not None else 0.0)
 
     rows = [
         {"Category": "Domestic (with GST)", **{m: v for m, v in zip(month_cols, domestic_values)}},
@@ -534,13 +790,16 @@ def parse_accrued_schedule(csv_file) -> tuple:
 
     if hasattr(csv_file, "seek"):
         csv_file.seek(0)
-    df = pd.read_csv(csv_file, header=1)
+    raw_df = pd.read_csv(csv_file, header=None)
+    header_idx = _detect_header_row(raw_df, ["Dom/Intl", "Accrual for the period"])
+    if header_idx is None:
+        return [], []
+    df = _apply_header_row(raw_df, header_idx)
     if df.empty:
         return [], []
 
     # Identify month columns
-    month_pattern = re.compile(r'^[A-Za-z]{3}-\d{2}$')
-    month_cols = [col for col in df.columns if month_pattern.match(str(col).strip())]
+    month_cols = [col for col in df.columns if _is_month_col(col)]
     if not month_cols:
         return [], []
 
@@ -548,6 +807,7 @@ def parse_accrued_schedule(csv_file) -> tuple:
     last_row = df.tail(1).iloc[0]
 
     accrual_vector = []
+    month_labels = []
     for col in month_cols:
         raw_val = str(last_row.get(col, '')).strip()
         raw_val = raw_val.replace(',', '').replace('"', '')
@@ -556,8 +816,80 @@ def parse_accrued_schedule(csv_file) -> tuple:
         if pd.isna(val):
             val = 0
         accrual_vector.append(round(val / 10000000, 2))
+        month_labels.append(_month_label(col))
 
-    return month_cols, accrual_vector
+    return month_labels, accrual_vector
+
+
+def parse_accrued_full_table(csv_file) -> pd.DataFrame:
+    """
+    Parse Accrued Schedule CSV and return full client-level table with month columns.
+    """
+    if csv_file is None:
+        return pd.DataFrame()
+
+    if hasattr(csv_file, "seek"):
+        csv_file.seek(0)
+    raw_df = pd.read_csv(csv_file, header=None)
+    header_idx = _detect_header_row(raw_df, ["Dom/Intl", "Accrual for the period"])
+    if header_idx is None:
+        return pd.DataFrame()
+    df = _apply_header_row(raw_df, header_idx)
+    if df.empty:
+        return pd.DataFrame()
+
+    id_cols = []
+    for col in ["Dom/Intl", "Stream", "Client Name", "Accrual for the period", "Deal Accrued", "Accrued in Books"]:
+        if col in df.columns:
+            id_cols.append(col)
+
+    month_cols = [col for col in df.columns if _is_month_col(col)]
+    if not month_cols:
+        return pd.DataFrame()
+
+    month_labels = [_month_label(col) for col in month_cols]
+    df = df[id_cols + month_cols].copy()
+    df = df.rename(columns={col: label for col, label in zip(month_cols, month_labels)})
+    return df
+
+
+def format_accrued_full_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    formatted = df.copy()
+    id_cols = {"Dom/Intl", "Stream", "Client Name", "Accrual for the period", "Payment TermsMaster/AR"}
+
+    def _fmt_cell(val):
+        if val is None:
+            return ""
+        if isinstance(val, str) and val.strip().endswith("%"):
+            return val.strip()
+        try:
+            num = float(str(val).replace(",", "").strip())
+            return _format_indian_number(num)
+        except Exception:
+            return str(val)
+
+    for col in formatted.columns:
+        if col in id_cols:
+            continue
+        formatted[col] = formatted[col].apply(_fmt_cell)
+    return formatted
+
+
+def _filter_accrual_totals(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    filtered = df.copy()
+    label_col = None
+    for col in filtered.columns:
+        if str(col).strip().lower() == "accrual for the period":
+            label_col = col
+            break
+    if label_col is not None:
+        labels = filtered[label_col].astype(str).str.strip().str.lower()
+        filtered = filtered[~labels.isin(["domestic", "international"])]
+    return filtered
 
 
 def _limit_to_mar26(month_cols: list, values: list) -> tuple:
@@ -597,7 +929,11 @@ def parse_accrued_domestic_international(csv_file, month_cols: list) -> pd.DataF
 
     if hasattr(csv_file, "seek"):
         csv_file.seek(0)
-    df = pd.read_csv(csv_file, header=1)
+    raw_df = pd.read_csv(csv_file, header=None)
+    header_idx = _detect_header_row(raw_df, ["Dom/Intl", "Accrual for the period"])
+    if header_idx is None:
+        return pd.DataFrame()
+    df = _apply_header_row(raw_df, header_idx)
     if df.empty:
         return pd.DataFrame()
 
@@ -618,11 +954,17 @@ def parse_accrued_domestic_international(csv_file, month_cols: list) -> pd.DataF
     domestic_row = domestic_row.iloc[0]
     international_row = international_row.iloc[0]
 
+    col_label_map = {}
+    for col in df.columns:
+        if _is_month_col(col):
+            col_label_map[_month_label(col)] = col
+
     domestic_values = []
     international_values = []
-    for col in month_cols:
-        dom_val = _parse_numeric(domestic_row.get(col, 0))
-        intl_val = _parse_numeric(international_row.get(col, 0))
+    for label in month_cols:
+        col = col_label_map.get(label)
+        dom_val = _parse_numeric(domestic_row.get(col, 0)) if col is not None else 0
+        intl_val = _parse_numeric(international_row.get(col, 0)) if col is not None else 0
         domestic_values.append(round((dom_val / 10000000) * 1.18, 2))
         international_values.append(round(intl_val / 10000000, 2))
 
@@ -657,6 +999,17 @@ def build_total_billing_table(month_cols: list, licensing_vector: list, accrual_
     return pd.DataFrame(rows)
 
 
+def _get_collection_weights() -> list:
+    trend_amounts = [
+        45721783, 510388488, 371478845, 196953135, 66288010,
+        73396012
+    ]
+    sum_trend_amounts = sum(trend_amounts)
+    total_trend = 1433318885
+    trend_amounts.append(total_trend - sum_trend_amounts)
+    return [amt / total_trend * 100 for amt in trend_amounts]
+
+
 def compute_collection_vector(billing_vector: list, ar_inputs: dict) -> list:
     """
     Compute monthly collections using payment trend weights and adjusted weights for prior AR.
@@ -665,14 +1018,7 @@ def compute_collection_vector(billing_vector: list, ar_inputs: dict) -> list:
         return []
 
     # Payment trend weights (percentages)
-    trend_amounts = [
-        45721783, 510388488, 371478845, 196953135, 66288010,
-        73396012
-    ]
-    sum_trend_amounts = sum(trend_amounts)
-    total_trend =  1433318885 
-    trend_amounts.append(total_trend - sum_trend_amounts)
-    weights = [amt / total_trend * 100 for amt in trend_amounts]  # percentages
+    weights = _get_collection_weights()
 
     # Adjusted weights for previous months (percentages)
     # Columns: A(-4)=Upto Apr, A(-3)=May, A(-2)=Jun, A(-1)=Jul
@@ -714,6 +1060,20 @@ def compute_collection_vector(billing_vector: list, ar_inputs: dict) -> list:
     for i in range(len(collections)):
         collections[i] = round(collections[i], 2)
     return collections
+
+
+def build_collection_calc_table(month_cols: list, billing_vector: list, collection_vector: list, weights: list) -> pd.DataFrame:
+    if not month_cols:
+        return pd.DataFrame()
+
+    rows = []
+    for idx, weight in enumerate(weights, start=1):
+        rows.append({"Type": f"Weight W{idx} (%)", **{m: round(weight, 4) for m in month_cols}})
+
+    rows.append({"Type": "Monthly Billing", **{m: v for m, v in zip(month_cols, billing_vector)}})
+    rows.append({"Type": "Collection Output", **{m: v for m, v in zip(month_cols, collection_vector)}})
+
+    return pd.DataFrame(rows)
 
 
 def build_collection_table(month_cols: list, collection_vector: list) -> pd.DataFrame:
@@ -772,7 +1132,11 @@ def parse_ar_csv(csv_file) -> dict:
 
     if hasattr(csv_file, "seek"):
         csv_file.seek(0)
-    df = pd.read_csv(csv_file, header=5)
+    raw_df = pd.read_csv(csv_file, header=None)
+    header_idx = _detect_header_row(raw_df, ["Company Code Currency", "Client Name"])
+    if header_idx is None:
+        return {}
+    df = _apply_header_row(raw_df, header_idx)
     if df.empty:
         return {}
 
@@ -826,6 +1190,20 @@ def parse_ar_csv(csv_file) -> dict:
     return ar_inputs
 
 
+def parse_invoice_register_csv(csv_file) -> pd.DataFrame:
+    if csv_file is None:
+        return pd.DataFrame()
+    if hasattr(csv_file, "seek"):
+        csv_file.seek(0)
+    raw_df = pd.read_csv(csv_file, header=None)
+    header_idx = _detect_header_row(raw_df, ["Clearing Date"])
+    if header_idx is None:
+        header_idx = _detect_header_row(raw_df, ["Invoice"])
+    if header_idx is not None:
+        return _apply_header_row(raw_df, header_idx)
+    return raw_df
+
+
 # All calculation functions are imported from cash_flow_calculator
 # Only Streamlit-specific wrappers are kept here
 
@@ -836,6 +1214,7 @@ st.markdown("### Follow the flow outlined in the CSV files to calculate cash flo
 # Sidebar for navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Select Step", [
+    "0. Upload Excel & Contracts",
     "1. Upload & Parse Contracts",
     "2. Contract Weighted Average",
     "3. Digital Licensing Revenue",
@@ -844,16 +1223,87 @@ page = st.sidebar.radio("Select Step", [
     "6. Collection Trend"
 ])
 
-# Step 1: File Upload
-if page == "1. Upload & Parse Contracts":
-    st.header("📁 Step 1: Upload & Parse Contracts")
-    st.markdown("Upload contract PDFs and view parsed output.")
-    
+# Step 0: Upload Excel + Contracts
+if page == "0. Upload Excel & Contracts":
+    st.header("📁 Step 0: Upload Excel & Contracts")
+    st.markdown("Upload the master Excel and contract PDFs. Sheets are parsed for later steps.")
+
+    excel_file = st.file_uploader(
+        "Master Excel Workbook (.xlsx)",
+        type=['xlsx']
+    )
+
+    if excel_file is not None:
+        with st.spinner("Reading Excel sheets..."):
+            if hasattr(excel_file, "seek"):
+                excel_file.seek(0)
+            xls = pd.ExcelFile(excel_file)
+            sheet_specs = {
+                "AR": [["ar"]],
+                "Contract Data": [["contract", "data"]],
+                "Invoice Register": [["invoice", "register"]],
+                "Accured Schedule": [["accured", "schedule"], ["accrued", "schedule"]],
+                "DL Revenue": [["dl", "revenue"]],
+            }
+            exact_names = {
+                "AR": ["AR"],
+                "Contract Data": ["Contract Data"],
+                "Invoice Register": ["Invoice Register"],
+                "Accured Schedule": ["Accured Schedule"],
+                "DL Revenue": ["DL Revenue"],
+            }
+
+            found = {}
+            missing = []
+
+            lower_map = {s.lower().strip(): s for s in xls.sheet_names}
+            for label, key_sets in sheet_specs.items():
+                matched_sheet = None
+                for exact in exact_names.get(label, []):
+                    exact_lower = exact.lower().strip()
+                    if exact_lower in lower_map:
+                        matched_sheet = lower_map[exact_lower]
+                        break
+                if matched_sheet is None:
+                    for keys in key_sets:
+                        for sheet_name in xls.sheet_names:
+                            lowered = sheet_name.lower().strip()
+                            if all(k in lowered for k in keys):
+                                matched_sheet = sheet_name
+                                break
+                        if matched_sheet:
+                            break
+
+                if matched_sheet:
+                    df_sheet = pd.read_excel(excel_file, sheet_name=matched_sheet, header=None)
+                    csv_text = df_sheet.to_csv(index=False, header=False)
+                    buffer = io.StringIO(csv_text)
+
+                    if label == "AR":
+                        st.session_state.ar_data_file = buffer
+                    elif label == "Contract Data":
+                        st.session_state.contract_data_file = buffer
+                    elif label == "Invoice Register":
+                        st.session_state.invoice_register_file = buffer
+                    elif label == "Accured Schedule":
+                        st.session_state.accrual_data_file = buffer
+                    elif label == "DL Revenue":
+                        st.session_state.revenue_data_file = buffer
+
+                    found[label] = matched_sheet
+                else:
+                    missing.append(label)
+
+            if found:
+                st.success("✅ Sheets loaded from Excel")
+                st.json(found)
+            if missing:
+                st.warning(f"⚠️ Missing sheets: {', '.join(missing)}")
+
     st.subheader("Contract PDFs")
     st.markdown("**Client agreement PDFs**")
     contract_files = st.file_uploader("Upload Contract PDFs", type=['pdf'], accept_multiple_files=True, key='contracts')
     if contract_files:
-        # Ensure list-like
         if not isinstance(contract_files, list):
             contract_files = [contract_files]
         contracts_list = []
@@ -876,12 +1326,16 @@ if page == "1. Upload & Parse Contracts":
         else:
             st.warning("⚠️ No contract data extracted. Please check the uploaded PDFs.")
 
+# Step 1: Contract Parsing Output
+elif page == "1. Upload & Parse Contracts":
+    st.header("📁 Step 1: Upload & Parse Contracts")
+    st.markdown("Review parsed contract data and generate payment schedules.")
+
     st.subheader("Contract Parsing Output")
     if st.session_state.contracts_data is not None and not st.session_state.contracts_data.empty:
         st.markdown("These are the fields extracted from the uploaded contract PDFs.")
         st.dataframe(clean_dataframe_for_display(st.session_state.contracts_data))
 
-        # Process contract payment schedules
         if st.button("Process Contracts (Payment Schedule)"):
             with st.spinner("Analyzing contract payment schedules..."):
                 schedules = []
@@ -901,20 +1355,12 @@ if page == "1. Upload & Parse Contracts":
                 else:
                     st.info("No payment schedule data extracted from contracts.")
     else:
-        st.info("Upload contract PDFs above to view parsed contract data here.")
+        st.info("Upload contract PDFs in Step 0 to view parsed contract data here.")
 
 # Step 2: Contract Weighted Average
 elif page == "2. Contract Weighted Average":
     st.header("🧮 Step 2: Contract Weighted Average")
-    st.markdown("Upload the contract data CSV to calculate monthly weighted averages.")
-
-    contract_csv = st.file_uploader(
-        "Contract Data CSV (format: test_documents/contract_data.csv)",
-        type=['csv']
-    )
-
-    if contract_csv is not None:
-        st.session_state.contract_data_file = contract_csv
+    st.markdown("Uses the Contract Data sheet from the master Excel upload.")
 
     top_n_option = st.selectbox(
         "Filter contracts by top Deal Value",
@@ -925,7 +1371,7 @@ elif page == "2. Contract Weighted Average":
 
     if st.button("Calculate Weighted Average"):
         if st.session_state.contract_data_file is None:
-            st.warning("⚠️ Please upload the contract data CSV file first.")
+            st.warning("⚠️ Please upload the master Excel in Step 0 first.")
         else:
             with st.spinner("Calculating weighted averages..."):
                 top_n = None
@@ -940,13 +1386,37 @@ elif page == "2. Contract Weighted Average":
                     st.session_state.contract_data_file,
                     top_n=top_n
                 )
+                full_contract_table = parse_contract_full_table(
+                    st.session_state.contract_data_file,
+                    top_n=top_n
+                )
+                if full_contract_table is not None and not full_contract_table.empty:
+                    st.subheader("Full Contract Data (with Totals & Weighted Avg)")
+                    display_full = full_contract_table.copy()
+                    month_cols = [c for c in display_full.columns if _is_month_col(c)]
+                    month_cols = [_month_label(c) if c in display_full.columns else c for c in month_cols]
+                    def _fmt_cell(val):
+                        if isinstance(val, str) and val.strip().endswith("%"):
+                            return val.strip()
+                        try:
+                            num = float(val)
+                            return _format_indian_number(num)
+                        except Exception:
+                            return "" if val is None else str(val)
+
+                    for col in display_full.columns:
+                        if col in month_cols or str(col).strip().lower() == "complete deal value":
+                            display_full[col] = display_full[col].apply(_fmt_cell)
+                    st.dataframe(clean_dataframe_for_display(display_full))
                 if weighted_df is not None and not weighted_df.empty:
                     st.session_state.weighted_avg_df = weighted_df
                     st.session_state.weighted_avg_vector = weighted_df['Weighted Average'].tolist()
                     st.success("✅ Weighted average calculated successfully")
-                    display_df = weighted_df
+                    display_df = weighted_df.copy()
                     if "Month" in display_df.columns:
                         display_df = display_df[display_df["Month"] <= "2026-03"]
+                    if "Weighted Average" in display_df.columns:
+                        display_df["Weighted Average"] = display_df["Weighted Average"].apply(lambda v: f"{round(v * 100)}%")
                     st.dataframe(clean_dataframe_for_display(display_df))
                     persist_state()
                 else:
@@ -955,21 +1425,13 @@ elif page == "2. Contract Weighted Average":
 # Step 4: Digital Licensing Revenue
 elif page == "3. Digital Licensing Revenue":
     st.header("📊 Step 3: Digital Licensing Revenue")
-    st.markdown("Upload Digital Licensing Revenue CSV to generate the billing pattern table.")
-
-    revenue_csv = st.file_uploader(
-        "Digital Licensing Revenue CSV (format: DL_Revenue_input.csv)",
-        type=['csv']
-    )
-
-    if revenue_csv is not None:
-        st.session_state.revenue_data_file = revenue_csv
+    st.markdown("Uses the DL Revenue sheet from the master Excel upload.")
 
     if st.button("Generate Billing Pattern Table"):
         if st.session_state.revenue_data_file is None:
-            st.warning("⚠️ Please upload the revenue CSV file first.")
+            st.warning("⚠️ Please upload the master Excel in Step 0 first.")
         elif st.session_state.weighted_avg_df is None or st.session_state.weighted_avg_df.empty:
-            st.warning("⚠️ Please calculate the Contract Weighted Average in Step 3 first.")
+            st.warning("⚠️ Please calculate the Contract Weighted Average in Step 2 first.")
         else:
             with st.spinner("Generating billing pattern table..."):
                 revenue_df = parse_revenue_csv(st.session_state.revenue_data_file)
@@ -1003,23 +1465,16 @@ elif page == "3. Digital Licensing Revenue":
 # Step 5: Accrued Schedule
 elif page == "4. Accrued Schedule":
     st.header("📑 Step 4: Accrued Schedule")
-    st.markdown("Upload Accrued Schedule CSV to compute accrual billing and totals.")
-
-    accrual_csv = st.file_uploader(
-        "Accrued Schedule CSV (format: test_documents/Accured_Schedule.csv)",
-        type=['csv']
-    )
-
-    if accrual_csv is not None:
-        st.session_state.accrual_data_file = accrual_csv
+    st.markdown("Uses the Accured Schedule sheet from the master Excel upload.")
 
     if st.button("Generate Accrual Tables"):
         if st.session_state.accrual_data_file is None:
-            st.warning("⚠️ Please upload the Accrued Schedule CSV file first.")
+            st.warning("⚠️ Please upload the master Excel in Step 0 first.")
         elif not st.session_state.monthly_billing_vector:
-            st.warning("⚠️ Please complete Step 4 to generate the licensing billing vector first.")
-        else:
+            st.warning("⚠️ Please complete Step 3 to generate the licensing billing vector first.")
+    else:
             with st.spinner("Generating accrual billing tables..."):
+                full_table = parse_accrued_full_table(st.session_state.accrual_data_file)
                 month_cols, accrual_vector = parse_accrued_schedule(st.session_state.accrual_data_file)
                 month_cols, accrual_vector = _limit_to_mar26(month_cols, accrual_vector)
                 if month_cols and accrual_vector:
@@ -1055,40 +1510,47 @@ elif page == "4. Accrued Schedule":
                     st.session_state.total_billing_vector = total_billing_vector
 
                     st.session_state.step5_accrual_table = accrual_table
+                    st.session_state.step5_full_table = full_table
                     st.session_state.step5_split_table = split_table
                     st.session_state.step5_total_table = total_table
 
                     st.success("✅ Accrual billing tables generated successfully")
-                    st.subheader("Accrual Billing (Normalized)")
-                    st.dataframe(clean_dataframe_for_display(accrual_table))
-                    st.subheader("Domestic (with GST) vs International")
-                    st.dataframe(clean_dataframe_for_display(split_table))
-                    st.subheader("Total Billing (Licensing + Accrual)")
-                    st.dataframe(clean_dataframe_for_display(total_table))
 
                     persist_state()
                 else:
                     st.warning("⚠️ Unable to parse the Accrued Schedule CSV. Please check the format.")
 
+    if st.session_state.step5_full_table is not None and not st.session_state.step5_full_table.empty:
+        full_table = _filter_accrual_totals(st.session_state.step5_full_table)
+        if "Mar-26" in full_table.columns:
+            cutoff_idx = full_table.columns.tolist().index("Mar-26") + 1
+            display_cols = [c for c in full_table.columns[:cutoff_idx] if c not in ["Deal Accrued", "Accrued in Books"]]
+            display_cols = [c for c in full_table.columns if c in display_cols or c in ["Dom/Intl", "Stream", "Client Name", "Accrual for the period", "Deal Accrued", "Accrued in Books"]]
+            full_table = full_table[display_cols]
+        if "Accrual for the period" in full_table.columns and not full_table.empty:
+            full_table = full_table.copy()
+            full_table.at[full_table.index[-1], "Accrual for the period"] = "Total"
+        st.subheader("Accrued Schedule (Client-level)")
+        st.dataframe(clean_dataframe_for_display(format_accrued_full_table(full_table)))
+    if st.session_state.step5_split_table is not None and not st.session_state.step5_split_table.empty:
+        st.subheader("Domestic (with GST) vs International")
+        st.dataframe(clean_dataframe_for_display(st.session_state.step5_split_table))
+    if st.session_state.step5_total_table is not None and not st.session_state.step5_total_table.empty:
+        st.subheader("Total Billing (Licensing + Accrual)")
+        st.dataframe(clean_dataframe_for_display(st.session_state.step5_total_table))
+
 # Step 5: Payment Trend
 elif page == "5. Payment Trend":
     st.header("📈 Step 5: Payment Trend")
-    
-    invoice_csv = st.file_uploader(
-        "Invoice Register CSV",
-        type=['csv']
-    )
-
-    if invoice_csv is not None:
-        st.session_state.invoice_register_file = invoice_csv
+    st.markdown("Uses the Invoice Register sheet from the master Excel upload.")
 
     if st.button("Parse Invoice Register"):
         if st.session_state.invoice_register_file is None:
-            st.warning("⚠️ Please upload the Invoice Register CSV first.")
+            st.warning("⚠️ Please upload the master Excel in Step 0 first.")
         else:
             with st.spinner("Parsing invoice register..."):
                 try:
-                    invoice_df = pd.read_csv(st.session_state.invoice_register_file)
+                    invoice_df = parse_invoice_register_csv(st.session_state.invoice_register_file)
                     st.session_state.invoice_register_df = invoice_df
                     st.success("✅ Invoice register parsed")
                     st.dataframe(clean_dataframe_for_display(invoice_df.head(10)))
@@ -1121,15 +1583,7 @@ elif page == "5. Payment Trend":
 # Step 6: Collection Trend
 elif page == "6. Collection Trend":
     st.header("📊 Step 6: Collection Trend")
-    st.markdown("Upload AR CSV (format: test_documents/AR.csv) to calculate collection trend.")
-
-    ar_csv = st.file_uploader(
-        "AR CSV",
-        type=['csv']
-    )
-
-    if ar_csv is not None:
-        st.session_state.ar_data_file = ar_csv
+    st.markdown("Uses the AR sheet from the master Excel upload.")
 
     if st.session_state.ar_data_file is not None:
         ar_inputs = parse_ar_csv(st.session_state.ar_data_file)
@@ -1144,7 +1598,9 @@ elif page == "6. Collection Trend":
             }])
             st.dataframe(clean_dataframe_for_display(ar_df))
         else:
-            st.warning("⚠️ Unable to parse AR inputs from the CSV. Please check the format.")
+            st.warning("⚠️ Unable to parse AR inputs from the Excel sheet. Please check the format.")
+    else:
+        st.info("Upload the master Excel in Step 0 to load AR inputs.")
 
     frequency = st.selectbox(
         "Display frequency",
@@ -1155,6 +1611,8 @@ elif page == "6. Collection Trend":
     if st.button("Calculate Collection Trend"):
         if not st.session_state.monthly_billing_vector:
             st.warning("⚠️ Please complete Step 3 to generate the licensing billing vector first.")
+        elif not st.session_state.ar_inputs:
+            st.warning("⚠️ Please upload the master Excel in Step 0 to load AR inputs.")
         else:
             # Derive month columns from Step 4 table
             month_cols = []
@@ -1177,13 +1635,24 @@ elif page == "6. Collection Trend":
                     st.session_state.collection_vector = collection_vector
                     st.session_state.collection_table = build_collection_table(month_cols, collection_vector)
 
-                    st.subheader("Collection Table (Monthly)")
+                    # calc_table = build_collection_calc_table(
+                    #     month_cols,
+                    #     billing_vector[:len(month_cols)],
+                    #     collection_vector,
+                    #     _get_collection_weights()
+                    # )
+                    # if calc_table is not None and not calc_table.empty:
+                    #     st.subheader("Collection Calculation (Weights + Billing)")
+                    #     st.dataframe(clean_dataframe_for_display(calc_table))
+
+                    st.subheader("Collection Trend (Monthly)")
                     st.dataframe(clean_dataframe_for_display(st.session_state.collection_table))
 
-                    # Rescaled display table + bar chart
+                    # Rescaled display table + bar chart (skip table if Monthly)
                     rescaled_df = rescale_collection_vector(month_cols, collection_vector, frequency)
-                    st.subheader(f"Collection Trend ({frequency})")
-                    st.dataframe(clean_dataframe_for_display(rescaled_df))
+                    if frequency != "Monthly":
+                        st.subheader(f"Collection Trend ({frequency})")
+                        st.dataframe(clean_dataframe_for_display(rescaled_df))
                     values = rescaled_df["Collection"].tolist()
                     tickvals = _get_tickvals(values)
                     ticktext = [_format_indian_number(v) for v in tickvals]
@@ -1195,7 +1664,7 @@ elif page == "6. Collection Trend":
                     ))
                     fig.update_yaxes(tickvals=tickvals, ticktext=ticktext)
                     fig.update_layout(xaxis_title="Period", yaxis_title="Collection")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     # Domestic vs International split
                     dom_pct = 0.94868
@@ -1224,7 +1693,7 @@ elif page == "6. Collection Trend":
                     ))
                     fig_split.update_yaxes(tickvals=tickvals, ticktext=ticktext)
                     fig_split.update_layout(barmode="group", xaxis_title="Period", yaxis_title="Collection")
-                    st.plotly_chart(fig_split, use_container_width=True)
+                    st.plotly_chart(fig_split, width="stretch")
 
                     persist_state()
 
@@ -1233,7 +1702,8 @@ elif page == "6. Collection Trend":
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Flow Overview")
 st.sidebar.markdown("""
-1. **Upload & Parse Contracts** - Upload PDFs and parse in the same step
+0. **Upload Excel & Contracts** - Load sheets and PDFs
+1. **Upload & Parse Contracts** - Review parsed contracts
 2. **Contract Weighted Average** - Calculate monthly weight distribution
 3. **Digital Licensing Revenue** - Generate billing pattern table
 4. **Accrued Schedule** - Accrual billing and totals
