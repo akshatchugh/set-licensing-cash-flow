@@ -56,8 +56,9 @@ def extract_text_from_pdf(pdf_file) -> str:
     """
     if not DOCLING_AVAILABLE:
         return ""
-    
+    print("E2")
     try:
+        print("E3")
         # Handle Streamlit UploadedFile or file path
         if hasattr(pdf_file, "read"):
             # Streamlit UploadedFile - write to temp file

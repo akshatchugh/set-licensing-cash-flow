@@ -265,6 +265,7 @@ load_persisted_state()
 def extract_text_from_pdf_streamlit(pdf_file) -> str:
     """Extract text from PDF file with Streamlit error handling"""
     try:
+        print("E1")
         return extract_text_from_pdf(pdf_file)
     except Exception as e:
         st.error(f"Error extracting PDF: {str(e)}")
@@ -1314,6 +1315,7 @@ if page == "0. Upload Excel & Contracts":
         
         with st.spinner(f"Processing {len(contract_files)} contract PDF(s)..."):
             for contract_file in contract_files:
+                print("E")
                 pdf_text = extract_text_from_pdf_streamlit(contract_file)
                 contract_data = extract_contract_data(pdf_text, contract_file.name)
                 contract_data['Filename'] = contract_file.name
