@@ -17,9 +17,11 @@ import streamlit as st
 
 
 os.environ.setdefault("DOCLING_ALLOW_EXTERNAL_PLUGINS", "true")
+os.environ.setdefault("ALLOW_EXTERNAL_PLUGINS", "true")
 # Try to import Langchain Docling
 try:
     from langchain_docling import DoclingLoader
+    from docling.document_converter import DocumentConverter
     DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
@@ -31,6 +33,18 @@ try:
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
+
+
+def _get_docling_loader(file_path: str) -> "DoclingLoader":
+    try:
+        converter = DocumentConverter(allow_external_plugins=True)
+    except TypeError:
+        converter = DocumentConverter()
+    return DoclingLoader(
+        file_path,
+        converter=converter,
+        convert_kwargs={"allow_external_plugins": True},
+    )
 
 
 def extract_text_from_pdf(pdf_file) -> str:
@@ -57,7 +71,7 @@ def extract_text_from_pdf(pdf_file) -> str:
             
             try:
                 # Use DoclingLoader to extract text
-                loader = DoclingLoader(tmp_path)
+                loader = _get_docling_loader(tmp_path)
                 documents = loader.load()
                 
                 # Combine all document text
@@ -86,7 +100,7 @@ def extract_text_from_pdf(pdf_file) -> str:
         else:
             # File path - use directly
             try:
-                loader = DoclingLoader(pdf_file)
+                loader = _get_docling_loader(pdf_file)
                 documents = loader.load()
                 
                 text_parts = []
