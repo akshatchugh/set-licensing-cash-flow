@@ -14,6 +14,14 @@ import openpyxl
 from dotenv import load_dotenv
 import streamlit as st
 # Load environment variables
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+
+pipeline_options = PdfPipelineOptions()
+pipeline_options.allow_external_plugins = True  # <-- your options here
+
+
 
 
 os.environ.setdefault("DOCLING_ALLOW_EXTERNAL_PLUGINS", "true")
@@ -37,15 +45,20 @@ except ImportError:
 
 def _get_docling_loader(file_path: str) -> "DoclingLoader":
     try:
-        converter = DocumentConverter(allow_external_plugins=True)
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=pipeline_options
+                )
+            }
+        )
         print("Y")
     except TypeError:
         converter = DocumentConverter()
         print("Z")
     return DoclingLoader(
         file_path,
-        converter=converter,
-        convert_kwargs={"allow_external_plugins": True},
+        converter=converter
     )
 
 
