@@ -9,11 +9,7 @@ import json
 import io
 from pathlib import Path
 import calendar
-import os
 warnings.filterwarnings('ignore')
-os.environ['AZURE_ENDPOINT'] = st.secrets['AZURE_ENDPOINT']
-os.environ['AZURE_OPENAI_API_KEY'] = st.secrets['AZURE_OPENAI_API_KEY']
-os.environ['AZURE_DEPLOYMENT'] = st.secrets['AZURE_DEPLOYMENT']
 def _format_indian_number(value) -> str:
     """
     Format number with Indian comma grouping and 2 decimal places.

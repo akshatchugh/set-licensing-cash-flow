@@ -13,9 +13,6 @@ import tempfile
 import openpyxl
 from dotenv import load_dotenv
 import streamlit as st
-os.environ['AZURE_ENDPOINT'] = st.secrets['AZURE_ENDPOINT']
-os.environ['AZURE_OPENAI_API_KEY'] = st.secrets['AZURE_OPENAI_API_KEY']
-os.environ['AZURE_DEPLOYMENT'] = st.secrets['AZURE_DEPLOYMENT']
 # Load environment variables
 
 
@@ -115,10 +112,10 @@ def extract_contract_data_ai(pdf_text: str, filename: str) -> Optional[Dict]:
     
     try:
         # Get Azure OpenAI configuration from environment
-        azure_endpoint = os.getenv('AZURE_ENDPOINT')
-        azure_api_key = os.getenv('AZURE_OPENAI_API_KEY')
-        azure_deployment = os.getenv('AZURE_DEPLOYMENT', 'gpt-4')
-        api_version = os.getenv('AZURE_OPENAI_API_VERSION', '2024-02-15-preview')
+        azure_endpoint = st.secrets['AZURE_ENDPOINT']
+        azure_api_key = st.secrets['AZURE_OPENAI_API_KEY']
+        azure_deployment = st.secrets['AZURE_DEPLOYMENT']
+        api_version = '2024-02-15-preview'
         
         if not azure_endpoint or not azure_api_key:
             return None
