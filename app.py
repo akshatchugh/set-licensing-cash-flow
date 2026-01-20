@@ -9,6 +9,8 @@ import json
 import io
 from pathlib import Path
 import calendar
+import sys
+sys.path.append(str(Path(__file__).parent))
 warnings.filterwarnings('ignore')
 def _format_indian_number(value) -> str:
     """
@@ -191,7 +193,7 @@ def clean_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return df_clean
 
 # Import functions from cash_flow_calculator
-from cash_flow_calculator import (
+from .cash_flow_calculator import (
     extract_text_from_pdf,
     extract_contract_data,
     analyze_contract_payment_schedule
