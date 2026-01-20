@@ -16,6 +16,7 @@ import streamlit as st
 # Load environment variables
 
 
+os.environ.setdefault("DOCLING_ALLOW_EXTERNAL_PLUGINS", "true")
 # Try to import Langchain Docling
 try:
     from langchain_docling import DoclingLoader

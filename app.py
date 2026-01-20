@@ -193,18 +193,12 @@ def clean_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return df_clean
 
 # Import functions from cash_flow_calculator
-try:
-    from .cash_flow_calculator import (
-        extract_text_from_pdf,
-        extract_contract_data,
-        analyze_contract_payment_schedule
-    )
-except ImportError:
-    from cash_flow_calculator import (
-        extract_text_from_pdf,
-        extract_contract_data,
-        analyze_contract_payment_schedule
-    )
+
+from cash_flow_calculator import (
+    extract_text_from_pdf,
+    extract_contract_data,
+    analyze_contract_payment_schedule
+)
 
 # Page configuration
 st.set_page_config(

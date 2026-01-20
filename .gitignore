@@ -13,3 +13,4 @@ __pycache__
 calc_instructions.txt
 *.csv
 *.zip
+*.xlsx
