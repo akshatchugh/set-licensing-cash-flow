@@ -38,8 +38,10 @@ except ImportError:
 def _get_docling_loader(file_path: str) -> "DoclingLoader":
     try:
         converter = DocumentConverter(allow_external_plugins=True)
+        print("Y")
     except TypeError:
         converter = DocumentConverter()
+        print("Z")
     return DoclingLoader(
         file_path,
         converter=converter,
@@ -73,7 +75,7 @@ def extract_text_from_pdf(pdf_file) -> str:
                 # Use DoclingLoader to extract text
                 loader = _get_docling_loader(tmp_path)
                 documents = loader.load()
-                
+                print("X")
                 # Combine all document text
                 text_parts = []
                 for doc in documents:
@@ -85,7 +87,7 @@ def extract_text_from_pdf(pdf_file) -> str:
                         text_parts.append(doc['page_content'])
                 
                 text = "\n".join(text_parts)
-                
+                print("A")
                 # Clean up temp file
                 os.remove(tmp_path)
                 
@@ -94,6 +96,7 @@ def extract_text_from_pdf(pdf_file) -> str:
                 # Clean up temp file on error
                 try:
                     os.remove(tmp_path)
+                    print("B")
                 except:
                     pass
                 return ""
@@ -102,7 +105,7 @@ def extract_text_from_pdf(pdf_file) -> str:
             try:
                 loader = _get_docling_loader(pdf_file)
                 documents = loader.load()
-                
+                print("C")
                 text_parts = []
                 for doc in documents:
                     if hasattr(doc, 'page_content'):
@@ -111,7 +114,7 @@ def extract_text_from_pdf(pdf_file) -> str:
                         text_parts.append(doc)
                     elif isinstance(doc, dict) and 'page_content' in doc:
                         text_parts.append(doc['page_content'])
-                
+                print("D")
                 text = "\n".join(text_parts)
                 return text if text.strip() else ""
             except Exception:
