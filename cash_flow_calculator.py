@@ -12,9 +12,12 @@ import json
 import tempfile
 import openpyxl
 from dotenv import load_dotenv
-
+import streamlit as st
+os.environ['AZURE_ENDPOINT'] = st.secrets['AZURE_ENDPOINT']
+os.environ['AZURE_OPENAI_API_KEY'] = st.secrets['AZURE_OPENAI_API_KEY']
+os.environ['AZURE_DEPLOYMENT'] = st.secrets['AZURE_DEPLOYMENT']
 # Load environment variables
-load_dotenv()
+
 
 # Try to import Langchain Docling
 try:
