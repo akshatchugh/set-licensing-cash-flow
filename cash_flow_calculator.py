@@ -14,13 +14,13 @@ import openpyxl
 from dotenv import load_dotenv
 import streamlit as st
 # Load environment variables
+from docling.datamodel import vlm_model_specs
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.pipeline_options import (
+    VlmPipelineOptions,
+)
 from docling.document_converter import DocumentConverter, PdfFormatOption
-
-pipeline_options = PdfPipelineOptions()
-pipeline_options.allow_external_plugins = True  # <-- your options here
-
+from docling.pipeline.vlm_pipeline import VlmPipeline
 
 
 
@@ -48,9 +48,9 @@ def _get_docling_loader(file_path: str) -> "DoclingLoader":
         converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(
-                    pipeline_options=pipeline_options
-                )
-            }
+                    pipeline_cls=VlmPipeline,
+                ),
+            }      
         )
         print("Y")
     except TypeError:

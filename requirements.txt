@@ -12,3 +12,4 @@ docling>=0.9.0
 easyocr>=1.7.1
 azure-identity>=1.15.0
 python-dotenv>=1.0.0
+docling[vlm]
